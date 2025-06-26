@@ -1,242 +1,316 @@
 "use client"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+
+import type React from "react"
+
+import { useState, useEffect } from "react"
 import { Button } from "@/components/ui/button"
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
-import { Plus, Eye, Edit, Send, Trash2 } from "lucide-react"
-import Link from "next/link"
-import { useInvoices, useCustomers } from "@/hooks/use-data"
-import { DataTable } from "@/components/ui/data-table"
-import type { Invoice } from "@/lib/types"
-import { formatCurrency, formatDate } from "@/lib/calculations"
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { Textarea } from "@/components/ui/textarea"
+import { Plus, Search, Filter, Eye, Edit, Trash2 } from "lucide-react"
+import { AuthGuard } from "@/components/auth/auth-guard"
+import { useAuth } from "@/components/auth/auth-provider"
+import { supabase } from "@/lib/supabase-client"
+import { toast } from "@/hooks/use-toast"
+
+interface Invoice {
+  id: string
+  invoice_number: string
+  amount: number
+  status: "draft" | "pending" | "paid" | "overdue"
+  due_date: string | null
+  created_at: string
+  customers: { name: string } | null
+}
+
+interface Customer {
+  id: string
+  name: string
+}
 
 export default function InvoicesPage() {
-  const { invoices, loading, updateInvoice, deleteInvoice } = useInvoices()
-  const { customers } = useCustomers()
+  const { user } = useAuth()
+  const [invoices, setInvoices] = useState<Invoice[]>([])
+  const [customers, setCustomers] = useState<Customer[]>([])
+  const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false)
+  const [loading, setLoading] = useState(true)
 
-  const handleStatusChange = async (invoiceId: string, newStatus: Invoice["status"]) => {
-    await updateInvoice(invoiceId, { status: newStatus })
-  }
+  useEffect(() => {
+    if (user) {
+      loadInvoices()
+      loadCustomers()
+    }
+  }, [user])
 
-  const handleDeleteInvoice = async (id: string) => {
-    if (confirm("Are you sure you want to delete this invoice?")) {
-      await deleteInvoice(id)
+  const loadInvoices = async () => {
+    try {
+      const { data, error } = await supabase
+        .from("invoices")
+        .select(`
+          *,
+          customers (
+            name
+          )
+        `)
+        .eq("user_id", user!.id)
+        .order("created_at", { ascending: false })
+
+      if (error) throw error
+      setInvoices(data || [])
+    } catch (error) {
+      console.error("Error loading invoices:", error)
+      toast({
+        title: "Error",
+        description: "Failed to load invoices",
+        variant: "destructive",
+      })
+    } finally {
+      setLoading(false)
     }
   }
 
-  const getStatusColor = (status: string) => {
-    switch (status) {
-      case "paid":
-        return "bg-green-100 text-green-800"
-      case "sent":
-        return "bg-blue-100 text-blue-800"
-      case "overdue":
-        return "bg-red-100 text-red-800"
-      case "draft":
-        return "bg-gray-100 text-gray-800"
-      default:
-        return "bg-gray-100 text-gray-800"
+  const loadCustomers = async () => {
+    try {
+      const { data, error } = await supabase.from("customers").select("id, name").eq("user_id", user!.id)
+
+      if (error) throw error
+      setCustomers(data || [])
+    } catch (error) {
+      console.error("Error loading customers:", error)
     }
   }
 
-  // Calculate stats
-  const totalOutstanding = invoices
-    .filter((inv) => inv.status === "sent" || inv.status === "overdue")
-    .reduce((sum, inv) => sum + inv.total, 0)
+  const createInvoice = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault()
+    const formData = new FormData(e.currentTarget)
 
-  const paidThisMonth = invoices
-    .filter((inv) => {
-      const invDate = new Date(inv.date)
-      const now = new Date()
-      return (
-        inv.status === "paid" && invDate.getMonth() === now.getMonth() && invDate.getFullYear() === now.getFullYear()
-      )
-    })
-    .reduce((sum, inv) => sum + inv.total, 0)
+    try {
+      // Generate invoice number
+      const invoiceCount = invoices.length + 1
+      const invoiceNumber = `INV-${invoiceCount.toString().padStart(3, "0")}`
 
-  const overdueInvoices = invoices.filter((inv) => {
-    if (inv.status !== "sent") return false
-    const dueDate = new Date(inv.dueDate)
-    return dueDate < new Date()
-  })
+      const { error } = await supabase.from("invoices").insert({
+        user_id: user!.id,
+        customer_id: formData.get("customer") as string,
+        invoice_number: invoiceNumber,
+        amount: Number.parseFloat(formData.get("amount") as string),
+        due_date: formData.get("due_date") as string,
+        description: formData.get("description") as string,
+        status: "draft",
+      })
 
-  const draftInvoices = invoices.filter((inv) => inv.status === "draft")
+      if (error) throw error
 
-  const columns = [
-    {
-      key: "invoiceNumber",
-      header: "Invoice #",
-      render: (invoice: Invoice) => <div className="font-medium">{invoice.invoiceNumber}</div>,
-    },
-    {
-      key: "customerName",
-      header: "Customer",
-      render: (invoice: Invoice) => invoice.customerName,
-    },
-    {
-      key: "total",
-      header: "Amount",
-      render: (invoice: Invoice) => <div className="font-semibold">{formatCurrency(invoice.total)}</div>,
-    },
-    {
-      key: "status",
-      header: "Status",
-      render: (invoice: Invoice) => (
-        <Badge className={getStatusColor(invoice.status)}>
-          {invoice.status.charAt(0).toUpperCase() + invoice.status.slice(1)}
-        </Badge>
-      ),
-    },
-    {
-      key: "date",
-      header: "Date",
-      render: (invoice: Invoice) => formatDate(invoice.date),
-    },
-    {
-      key: "dueDate",
-      header: "Due Date",
-      render: (invoice: Invoice) => formatDate(invoice.dueDate),
-    },
-  ]
+      toast({
+        title: "Success",
+        description: "Invoice created successfully",
+      })
+
+      setIsCreateDialogOpen(false)
+      loadInvoices()
+    } catch (error) {
+      console.error("Error creating invoice:", error)
+      toast({
+        title: "Error",
+        description: "Failed to create invoice",
+        variant: "destructive",
+      })
+    }
+  }
+
+  const deleteInvoice = async (id: string) => {
+    try {
+      const { error } = await supabase.from("invoices").delete().eq("id", id)
+
+      if (error) throw error
+
+      toast({
+        title: "Success",
+        description: "Invoice deleted successfully",
+      })
+
+      loadInvoices()
+    } catch (error) {
+      console.error("Error deleting invoice:", error)
+      toast({
+        title: "Error",
+        description: "Failed to delete invoice",
+        variant: "destructive",
+      })
+    }
+  }
+
+  const getStatusBadge = (status: string) => {
+    const variants = {
+      paid: "default",
+      pending: "secondary",
+      overdue: "destructive",
+      draft: "outline",
+    } as const
+
+    return (
+      <Badge variant={variants[status as keyof typeof variants]}>
+        {status.charAt(0).toUpperCase() + status.slice(1)}
+      </Badge>
+    )
+  }
 
   if (loading) {
-    return <div className="flex items-center justify-center min-h-screen">Loading...</div>
+    return (
+      <AuthGuard>
+        <div className="flex-1 flex items-center justify-center">
+          <div className="animate-spin rounded-full h-32 w-32 border-b-2 border-primary"></div>
+        </div>
+      </AuthGuard>
+    )
   }
 
   return (
-    <div className="min-h-screen bg-gray-50">
-      {/* Header */}
-      <header className="bg-white shadow-sm border-b">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex justify-between items-center py-4">
-            <div className="flex items-center space-x-4">
-              <Link href="/" className="text-2xl font-bold text-gray-900">
-                AccounTech Pro
-              </Link>
-              <nav className="hidden md:flex space-x-8">
-                <Link href="/" className="text-gray-600 hover:text-gray-900">
-                  Dashboard
-                </Link>
-                <Link href="/invoices" className="text-blue-600 font-medium">
-                  Invoices
-                </Link>
-                <Link href="/expenses" className="text-gray-600 hover:text-gray-900">
-                  Expenses
-                </Link>
-                <Link href="/reports" className="text-gray-600 hover:text-gray-900">
-                  Reports
-                </Link>
-                <Link href="/payroll" className="text-gray-600 hover:text-gray-900">
-                  Payroll
-                </Link>
-                <Link href="/customers" className="text-gray-600 hover:text-gray-900">
-                  Customers
-                </Link>
-              </nav>
-            </div>
-            <Link href="/invoices/new">
-              <Button>
-                <Plus className="w-4 h-4 mr-2" />
-                New Invoice
-              </Button>
-            </Link>
+    <AuthGuard>
+      <div className="flex-1 space-y-4 p-8 pt-6">
+        <div className="flex items-center justify-between space-y-2">
+          <h2 className="text-3xl font-bold tracking-tight">Invoices</h2>
+          <div className="flex items-center space-x-2">
+            <Dialog open={isCreateDialogOpen} onOpenChange={setIsCreateDialogOpen}>
+              <DialogTrigger asChild>
+                <Button>
+                  <Plus className="mr-2 h-4 w-4" />
+                  Create Invoice
+                </Button>
+              </DialogTrigger>
+              <DialogContent className="sm:max-w-[425px]">
+                <DialogHeader>
+                  <DialogTitle>Create New Invoice</DialogTitle>
+                  <DialogDescription>Create a new invoice for your customer.</DialogDescription>
+                </DialogHeader>
+                <form onSubmit={createInvoice}>
+                  <div className="grid gap-4 py-4">
+                    <div className="grid grid-cols-4 items-center gap-4">
+                      <Label htmlFor="customer" className="text-right">
+                        Customer
+                      </Label>
+                      <Select name="customer" required>
+                        <SelectTrigger className="col-span-3">
+                          <SelectValue placeholder="Select customer" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {customers.map((customer) => (
+                            <SelectItem key={customer.id} value={customer.id}>
+                              {customer.name}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="grid grid-cols-4 items-center gap-4">
+                      <Label htmlFor="amount" className="text-right">
+                        Amount
+                      </Label>
+                      <Input
+                        id="amount"
+                        name="amount"
+                        type="number"
+                        step="0.01"
+                        placeholder="0.00"
+                        className="col-span-3"
+                        required
+                      />
+                    </div>
+                    <div className="grid grid-cols-4 items-center gap-4">
+                      <Label htmlFor="due_date" className="text-right">
+                        Due Date
+                      </Label>
+                      <Input id="due_date" name="due_date" type="date" className="col-span-3" required />
+                    </div>
+                    <div className="grid grid-cols-4 items-center gap-4">
+                      <Label htmlFor="description" className="text-right">
+                        Description
+                      </Label>
+                      <Textarea
+                        id="description"
+                        name="description"
+                        placeholder="Invoice description..."
+                        className="col-span-3"
+                      />
+                    </div>
+                  </div>
+                  <DialogFooter>
+                    <Button type="submit">Create Invoice</Button>
+                  </DialogFooter>
+                </form>
+              </DialogContent>
+            </Dialog>
           </div>
         </div>
-      </header>
 
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        <div className="mb-8">
-          <h1 className="text-3xl font-bold text-gray-900 mb-2">Invoices</h1>
-          <p className="text-gray-600">Manage your customer invoices and payments</p>
+        <div className="flex items-center space-x-2">
+          <div className="relative flex-1 max-w-sm">
+            <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+            <Input placeholder="Search invoices..." className="pl-8" />
+          </div>
+          <Button variant="outline" size="icon">
+            <Filter className="h-4 w-4" />
+          </Button>
         </div>
 
-        {/* Stats Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
-          <Card>
-            <CardHeader className="pb-2">
-              <CardTitle className="text-sm font-medium text-gray-600">Total Outstanding</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="text-2xl font-bold text-red-600">{formatCurrency(totalOutstanding)}</div>
-              <p className="text-xs text-gray-600">
-                {invoices.filter((i) => i.status === "sent" || i.status === "overdue").length} invoices
-              </p>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardHeader className="pb-2">
-              <CardTitle className="text-sm font-medium text-gray-600">Paid This Month</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="text-2xl font-bold text-green-600">{formatCurrency(paidThisMonth)}</div>
-              <p className="text-xs text-gray-600">{invoices.filter((i) => i.status === "paid").length} invoices</p>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardHeader className="pb-2">
-              <CardTitle className="text-sm font-medium text-gray-600">Overdue</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="text-2xl font-bold text-red-600">
-                {formatCurrency(overdueInvoices.reduce((sum, inv) => sum + inv.total, 0))}
-              </div>
-              <p className="text-xs text-gray-600">{overdueInvoices.length} invoices</p>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardHeader className="pb-2">
-              <CardTitle className="text-sm font-medium text-gray-600">Draft</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="text-2xl font-bold text-gray-600">
-                {formatCurrency(draftInvoices.reduce((sum, inv) => sum + inv.total, 0))}
-              </div>
-              <p className="text-xs text-gray-600">{draftInvoices.length} invoices</p>
-            </CardContent>
-          </Card>
-        </div>
-
-        {/* Invoices Table */}
         <Card>
           <CardHeader>
-            <CardTitle>All Invoices</CardTitle>
-            <CardDescription>A list of all your invoices and their current status</CardDescription>
+            <CardTitle>Recent Invoices</CardTitle>
+            <CardDescription>Manage your invoices and track payments.</CardDescription>
           </CardHeader>
           <CardContent>
-            <DataTable
-              data={invoices}
-              columns={columns}
-              searchPlaceholder="Search invoices..."
-              actions={(invoice) => (
-                <div className="flex gap-2">
-                  <Link href={`/invoices/${invoice.id}`}>
-                    <Button variant="ghost" size="sm">
-                      <Eye className="w-4 h-4" />
-                    </Button>
-                  </Link>
-                  <Link href={`/invoices/${invoice.id}/edit`}>
-                    <Button variant="ghost" size="sm">
-                      <Edit className="w-4 h-4" />
-                    </Button>
-                  </Link>
-                  {invoice.status === "draft" && (
-                    <Button variant="ghost" size="sm" onClick={() => handleStatusChange(invoice.id, "sent")}>
-                      <Send className="w-4 h-4" />
-                    </Button>
-                  )}
-                  {invoice.status === "sent" && (
-                    <Button variant="ghost" size="sm" onClick={() => handleStatusChange(invoice.id, "paid")}>
-                      Mark Paid
-                    </Button>
-                  )}
-                  <Button variant="ghost" size="sm" onClick={() => handleDeleteInvoice(invoice.id)}>
-                    <Trash2 className="w-4 h-4" />
-                  </Button>
-                </div>
-              )}
-            />
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Invoice</TableHead>
+                  <TableHead>Customer</TableHead>
+                  <TableHead>Amount</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead>Due Date</TableHead>
+                  <TableHead className="text-right">Actions</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {invoices.map((invoice) => (
+                  <TableRow key={invoice.id}>
+                    <TableCell className="font-medium">{invoice.invoice_number}</TableCell>
+                    <TableCell>{invoice.customers?.name || "Unknown"}</TableCell>
+                    <TableCell>${invoice.amount.toFixed(2)}</TableCell>
+                    <TableCell>{getStatusBadge(invoice.status)}</TableCell>
+                    <TableCell>{invoice.due_date ? new Date(invoice.due_date).toLocaleDateString() : "N/A"}</TableCell>
+                    <TableCell className="text-right">
+                      <div className="flex items-center justify-end space-x-2">
+                        <Button variant="ghost" size="icon">
+                          <Eye className="h-4 w-4" />
+                        </Button>
+                        <Button variant="ghost" size="icon">
+                          <Edit className="h-4 w-4" />
+                        </Button>
+                        <Button variant="ghost" size="icon" onClick={() => deleteInvoice(invoice.id)}>
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
           </CardContent>
         </Card>
-      </main>
-    </div>
+      </div>
+    </AuthGuard>
   )
 }
